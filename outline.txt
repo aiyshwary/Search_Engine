@@ -1,0 +1,235 @@
+1. Ingest (files → object storage)
+
+Why: single durable source-of-truth for originals; keeps heavy binaries out of indexes.
+What: Users / batch jobs upload PDFs/Word/Images to object storage (S3 / MinIO).
+Pre-checks: filetype sniff, file-size limits, simple malware/checksum.
+Outcome (persist):
+
+doc_id, s3_path, uploader, ingest_time, mime_type, checksum, ingest_status stored in metadata DB.
+
+2. Extract & Normalize (text extraction + OCR)
+
+Why: only normalized text is searchable & embeddable; OCR required for scanned docs.
+What:
+
+Digital PDF/Word: extract embedded text (pdfminer / tika / docx).
+
+Scanned PDF/Image: OCR with tuned Tesseract or commercial engine using tam / kan models.
+
+Multi-pass OCR: if low confidence, run alternate OCR settings and choose best by confidence/heuristics.
+Normalize steps:
+
+Unicode normalize (NFC/NFKC), remove control / ZWJ chars.
+
+Normalize script variants, convert localized numerals to Arabic numerals.
+
+Standardize punctuation, collapse whitespace, fix common OCR errors (rule-based).
+
+Language detection (fastText) per document/page.
+Store outputs:
+
+plain text, per-page text, OCR confidence per page, layout info (page_no, bounding boxes), extraction logs.
+Outcome: doc_text, {page: text, bbox[], ocr_confidence}.
+
+3. Deduplication & Filtering (document-level)
+
+Why: avoid indexing duplicates, reduce cost, improve quality.
+What: run fast fuzzy-checks: file checksum, simhash/MinHash on extracted text, optionally LSH clustering.
+Action: mark as duplicate / link to canonical doc / drop near-duplicate.
+Outcome: deduplication status and canonical_doc_id in metadata.
+
+4. Chunking & Enrichment (chunk-level units)
+
+Why: chunk-size = best match unit for embeddings + snippet highlighting.
+What (chunking rules):
+
+Semantic chunks ≈ 400–800 tokens (paragraph-aware, keep sentence boundaries).
+
+Keep page boundaries and offsets to enable exact PDF highlight (store start/end offsets and page_no).
+Per-chunk enrichment:
+
+language tag (ta / kn), start_offset, end_offset, page_no.
+
+lightweight NER / rule-based extraction: detected dates, numerals, person/place names, tags.
+
+OCR chunk confidence (aggregate page-level confidences).
+
+chunk-level metadata: token_count, reading_language, embed_model_version placeholder.
+Deduplicate at chunk level: drop or merge near-identical chunks (thresholded cosine/simhash).
+Outcome: chunk_id, doc_id, text, page_no, offsets, language, ocr_confidence, tags.
+
+5. Embeddings (offline batch + versioning)
+
+Why: precompute once; versioning enables safe upgrades and rollbacks.
+What:
+
+Use a multilingual model that supports Tamil & Kannada (sentence-transformers family, LaBSE / XLM-R variants) — evaluate & pick best.
+
+Batch-embed chunks offline on GPU; store embedding_id, model_version, timestamp.
+
+Maintain a small hot-re-embed queue for recently updated docs.
+Storage: raw float32 vectors during build → then quantize. Keep metadata mapping: embedding_id → chunk_id.
+Outcome: embedding files + metadata ready for ANN indexing.
+
+6. Indexing — Two complementary indexes
+A. Sparse index (BM25) — OpenSearch / Elasticsearch
+
+What to index: chunk text + doc-level metadata (title, tags, language, doc-level fields).
+Analyzers: language-specific tokenizers/analyzers (Indic-aware or SentencePiece), Unicode normalization filter, stopwords, preserve numbers/dates.
+Sharding: shard by language and roughly by data size; replicas for HA.
+Outcome: fast BM25 queries returning (chunk_id, bm25_score) and doc-level BM25 score.
+
+B. Dense index (ANN) — FAISS / Milvus (IVF+PQ + hot HNSW)
+
+Index design:
+
+Cold/large tier: IVF + PQ (high compression for tens of millions).
+
+Hot/recent tier: HNSW in RAM for low-latency on recent/popular docs.
+Index metadata: store embedding_id, chunk_id, model_version, vector quantization params.
+Build & maintenance: periodic rebuilds or incremental inserts for near-real-time.
+Outcome: ANN query returns (chunk_id, vector_score).
+
+7. Retrieval & Aggregation (return whole documents)
+
+Query flow (concurrent & fast):
+
+Receive query → normalize → detect language.
+
+BM25 search (top-K₁ chunks, e.g. 100) → get (chunk_id, bm25_score).
+
+Embed query (same model_version) → ANN search (top-K₂ chunks, e.g. 100) → get (chunk_id, vector_score).
+
+Union candidates → map to doc_id.
+
+Aggregate per doc: compute features (examples below).
+
+Rerank documents using interpretable weighted formula or small learned ranker (LightGBM / logistic / small cross-encoder for top-K).
+
+Pick supporting snippets: choose best chunk(s) per doc for snippet, with page_no & offsets.
+
+Return: doc_id, title, top_snippet(text), page_no, offsets, presigned_s3_url, final_score, explanation(features).
+
+Aggregation features (compute for each doc):
+
+max_vector_chunk_score, avg_vector_chunk_score, sum_vector_scores
+
+max_BM25_chunk_score, avg_BM25_chunk_score
+
+BM25_doc_score (if indexed at doc-level)
+
+tag_match_count, named_entity_matches
+
+recency_score (based on created_at/modified_at)
+
+ocr_confidence_avg and ocr_confidence_min
+
+language_match (query-doc language match flag)
+
+popularity (clicks, access freq if available)
+
+8. Baseline scoring recipe (interpretable start)
+
+Interpretable baseline (tweak with dev data):
+
+doc_score =
+  0.40 * max_vector_chunk_score
++ 0.20 * avg_vector_chunk_score
++ 0.25 * max_BM25_chunk_score
++ 0.10 * BM25_doc_score
++ 0.05 * tag_match_boost
+
+
+Notes: normalize each feature (min-max or z-score) across candidate set before weighted sum. Tune weights via grid or small learning-to-rank.
+
+9. Reranking options (for final precision)
+
+Lightweight learned ranker (LightGBM) using aggregated features — cheap & interpretable.
+
+Cross-encoder (mono-mBERT) for final top-K (e.g., K=10) — expensive but increases precision. Use only when needed.
+
+Fallback: human-in-the-loop labeled dev set to train/validate.
+
+10. Data model (concise)
+
+documents:
+{doc_id, title, s3_path, language, created_at, updated_at, tags, ocr_confidence, canonical_doc_id, ingest_status}
+
+chunks:
+{chunk_id, doc_id, text, page_no, start_offset, end_offset, token_count, language, ocr_confidence, dedup_key}
+
+embeddings:
+{embedding_id, chunk_id, model_version, vector_location, quant_params}
+
+indexes: BM25 index stores chunk_id → text; Vector index stores embedding_id → vector.
+
+11. Indexing & operational practices
+
+Incremental indexing: new/updated docs → extract → chunk → embed → update BM25 & ANN. Use write-ahead queue (Kafka).
+
+Embeddings versioning: store model_version; allow multi-version search if necessary.
+
+Backups & snapshots: periodic snapshots for BM25 & vector metadata; store indexed blobs in object store.
+
+Monitoring & metrics: latency P50/P95/P99, recall@K, NDCG, index size, QPS, error rates, OCR confidence distributions.
+
+Alerting: index-build failures, QPS spikes, high-latency tails, low-recall regressions.
+
+CI/CD: tests for index schema changes, embedding model upgrades, and reindex flows.
+
+12. Performance & cost optimizations
+
+Quantize vectors (PQ/OPQ) to reduce RAM/disk.
+
+Two-tier ANN (hot HNSW + cold IVF+PQ) for latency/cost balance.
+
+Shard by language to reduce query work.
+
+Cache popular queries (Redis) with TTL and invalidate on relevant index changes.
+
+Hot/cold doc split: keep recent/popular docs in hot index.
+
+Batch embedding generation and avoid query-time embedding model changes.
+
+Autoscale ANN nodes independently of BM25 cluster.
+
+13. Evaluation & monitoring (what to track)
+
+Retrieval metrics: recall@100 (BM25 / ANN / hybrid), MRR, NDCG@10.
+
+Latency: P50/P95/P99 for full pipeline. Aim P95 < 300ms (infrastructure-dependent).
+
+Index health: node utilization, disk pressure, vector index fragmentation.
+
+OCR quality: % pages below confidence threshold.
+
+User metrics: CTR on top result, time-to-first-click, query reformulation rate.
+
+14. Incremental rollout plan (practical)
+
+Phase 0 — Prototype: 100k docs, OpenSearch BM25 + FAISS local HNSW, single embedding model.
+Phase 1 — Hybrid: batch embeddings, IVF+PQ for cold tier, chunk→doc aggregation, caching, basic eval set.
+Phase 2 — Efficiency: two-tier ANN, quantization, sharding by language, incremental indexing, basic ranker.
+Phase 3 — Scale: millions of docs, autoscaling, monitoring, A/B reranker experiments, embedding model upgrades.
+Phase 4 — Ops: SLOs, full backups, disaster recovery, cost optimizations.
+
+15. API & UX (concise)
+
+Search API: POST /search { query, language_hint?, top_n? }
+Response (per doc):
+{ doc_id, title, score, top_snippets: [{text, page_no, offsets}], presigned_s3_url, explanation_features }
+UI: list view with snippet highlights + “open document” anchor to page+highlight. Provide “more like this” leveraging ANN.
+
+16. Short elevator pitch (one paragraph)
+
+We ingest PDFs and Word files into object storage, extract and normalize text (with OCR for scans), and split documents into semantic chunks. We index chunks using a dual approach — BM25 for exact matches and a compressed ANN (IVF+PQ with a hot HNSW tier) for semantic matches — and precompute versioned embeddings. On query we run BM25 + ANN in parallel, union chunk results, aggregate chunk-level features to score whole documents, optionally rerank with a small learned model, and return the original document with precise page + highlight offsets. This hybrid, chunk→doc approach balances accuracy, interpretability, latency, and cost so it scales efficiently to millions of Tamil and Kannada documents.
+
+17. Extras — gotchas & tips
+
+OCR tuning is crucial — poor OCR ruins everything. Keep OCR confidence in features and surface low-confidence docs to ops.
+
+Language analyzers matter for BM25; do per-language analyzers.
+
+Names & numerals: keep exact-match paths for numbers/dates (index both raw and normalized).
+
+Test on real queries (not just random held-out text) to tune weights and model choices.
