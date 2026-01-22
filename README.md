@@ -115,6 +115,8 @@ faiss_ivfpq.index
 python search_service.py
 ```
 Example query:
+```
 q = "தமிழ்நாடு அரசு புதிய திட்டம்"
 lang = "ta"
+```
 
