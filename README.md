@@ -71,37 +71,49 @@ Document-level Ranking
     ├── chunks.jsonl
     ├── chunks_embeddings.npy
     ├── embeddings_meta.jsonl
-    └── faiss_ivfpq.index ```
+    └── faiss_ivfpq.index
+```
 
 ## 🚀 End-to-End Pipeline
 1️⃣ Ingest documents
-``` python optimized_ingest.py ```
+``` python optimized_ingest.py 
+```
 Outputs:
 output/documents.jsonl
 
 2️⃣ Deduplicate documents
+```
 python dedupe_simhash.py
+```
 Outputs:
 output/deduped_docs.jsonl
 
 3️⃣ Chunk documents
+```
 python chunker.py
+```
 Outputs:
 output/chunks.jsonl
 
 4️⃣ Generate embeddings
+```
 python embedder.py
+```
 Outputs:
 chunks_embeddings.npy
 embeddings_meta.jsonl
 
 5️⃣ Build FAISS index
+```
 python build_faiss.py
+```
 Outputs:
 faiss_ivfpq.index
 
 6️⃣ Search (Hybrid BM25 + ANN)
+```
 python search_service.py
+```
 Example query:
 q = "தமிழ்நாடு அரசு புதிய திட்டம்"
 lang = "ta"
