@@ -57,25 +57,25 @@ Hybrid Search (BM25 + ANN)
 Document-level Ranking
 
 📁 Repository Structure
-.
-├── ingest.py                # Basic ingestion pipeline
-├── optimized_ingest.py      # Parallel, OCR-aware ingestion (recommended)
-├── dedupe_simhash.py        # Near-duplicate document detection
-├── chunker.py               # Token-aware chunking with overlap
-├── embedder.py              # Multilingual embeddings generation
-├── build_faiss.py           # FAISS index builders (IVF-PQ, HNSW, Flat)
-├── search_service.py        # Hybrid search API (BM25 + FAISS)
-├── dataset/                 # Input documents (PDF/DOCX)
-└── output/
+ ```
+ ├── ingest.py                # Basic ingestion pipeline
+ ├── optimized_ingest.py      # Parallel, OCR-aware ingestion (recommended)
+ ├── dedupe_simhash.py        # Near-duplicate document detection
+ ├── chunker.py               # Token-aware chunking with overlap
+ ├── embedder.py              # Multilingual embeddings generation
+ ├── build_faiss.py           # FAISS index builders (IVF-PQ, HNSW, Flat)
+ ├── search_service.py        # Hybrid search API (BM25 + FAISS)
+ ├── dataset/                 # Input documents (PDF/DOCX)
+ └── output/
     ├── documents.jsonl
     ├── chunks.jsonl
     ├── chunks_embeddings.npy
     ├── embeddings_meta.jsonl
-    └── faiss_ivfpq.index
+    └── faiss_ivfpq.index ```
 
 ## 🚀 End-to-End Pipeline
 1️⃣ Ingest documents
-''' python optimized_ingest.py '''
+``` python optimized_ingest.py ```
 Outputs:
 output/documents.jsonl
 
